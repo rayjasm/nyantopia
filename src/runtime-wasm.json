@@ -1,0 +1,5 @@
+{
+  "__comment": "WebLLM の JavaScript に埋め込まれている wasm の切り出し先。build.mjs が見つけた順に対応する(xgrammar が先)",
+  "files": ["xgrammar.wasm", "web-tokenizers.wasm"],
+  "global": "__nyantopiaRuntimeWasm"
+}

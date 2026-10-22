@@ -1,0 +1,68 @@
+:root {
+  --bg: #fff8f3;
+  --card: #ffffff;
+  --text: #3b2f2f;
+  --muted: #8a7b74;
+  --accent: #f4a261;
+  --accent-dark: #e76f51;
+  --border: #f0e2d8;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  width: 320px;
+  padding: 12px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  font-size: 13px;
+}
+header { margin-bottom: 10px; }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+.tagline { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+.hint { color: var(--muted); font-size: 11px; margin: 6px 0 0; line-height: 1.5; }
+.status { margin: 6px 0 0; font-size: 12px; }
+.status.ok { color: #2a9d8f; }
+.status.error { color: var(--accent-dark); }
+.model-name { margin: 0 0 6px; font-size: 11px; color: var(--muted); word-break: break-all; }
+.row { display: flex; gap: 8px; margin-top: 8px; }
+button {
+  flex: 1;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+button.secondary { background: #f3e9e2; color: var(--text); }
+.progress { height: 6px; background: #f3e9e2; border-radius: 3px; overflow: hidden; }
+.progress-bar { height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
+.radio-row, .check-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; cursor: pointer; }
+.switch-row {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 15px; font-weight: 600; cursor: pointer;
+}
+.switch-row input { display: none; }
+.switch {
+  width: 44px; height: 24px; border-radius: 12px; background: #ddd; position: relative; transition: background 0.2s;
+}
+.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
+  border-radius: 50%; background: #fff; transition: left 0.2s;
+}
+.switch-row input:checked + .switch { background: var(--accent); }
+.switch-row input:checked + .switch::after { left: 22px; }
+.version { color: #c4b5ab; font-size: 11px; margin-left: 4px; }
+footer { display: flex; gap: 6px; justify-content: center; color: #c4b5ab; font-size: 11px; margin-top: 2px; }
+footer a { color: #c4b5ab; }

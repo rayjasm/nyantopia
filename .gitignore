@@ -1,0 +1,22 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Node
+node_modules/
+*.log
+
+# Env
+.env
+.env.*
+
+# Build
+dist/
+web-ext-artifacts/
+
+# WebLLM の wasm(ビルド時に scripts/fetch-wasm.mjs がダウンロードする)
+public/wasm/

@@ -1,0 +1,39 @@
+{
+  "name": "nyantopia-firefox",
+  "version": "0.2.0",
+  "description": "悪口のないやさしい世界。きつい言葉をねこ語に変換するブラウザ拡張機能(Firefox 版)",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json",
+    "start": "web-ext run --source-dir dist",
+    "lint": "web-ext lint --source-dir dist",
+    "build:release": "node build.mjs --release",
+    "package": "npm run build:release && web-ext build --source-dir dist --overwrite-dest --filename nyantopia-firefox-{version}.zip",
+    "package:source": "node scripts/package-source.mjs",
+    "e2e:rule": "node test/e2e.mjs rule",
+    "e2e:llm": "node test/e2e.mjs llm",
+    "eval": "node test/eval.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rayjasm/nyantopia.git"
+  },
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/rayjasm/nyantopia/issues"
+  },
+  "homepage": "https://github.com/rayjasm/nyantopia#readme",
+  "dependencies": {
+    "@mlc-ai/web-llm": "0.2.86"
+  },
+  "devDependencies": {
+    "@types/webextension-polyfill": "0.12.6",
+    "esbuild": "0.28.2",
+    "selenium-webdriver": "4.51.0",
+    "typescript": "7.0.2",
+    "web-ext": "10.8.0"
+  },
+  "private": true,
+  "type": "module"
+}

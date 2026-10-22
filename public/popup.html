@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>にゃんとぴあ</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>にゃんとぴあ 🐾</h1>
+    <p class="tagline">悪口のないやさしい世界 <span class="version" id="version"></span></p>
+  </header>
+
+  <section class="card">
+    <label class="switch-row">
+      <span>ねこ語変換</span>
+      <input type="checkbox" id="enabled">
+      <span class="switch"></span>
+    </label>
+    <p class="hint">ONにすると開いているページの語尾が「にゃ」になります</p>
+  </section>
+
+  <section class="card">
+    <h2>変換エンジン</h2>
+    <label class="radio-row"><input type="radio" name="engine" value="llm"> <span>ねこ語モデル（ブラウザ内 LLM）</span></label>
+    <label class="radio-row"><input type="radio" name="engine" value="rule"> <span>かんたん変換（ルールのみ、高速）</span></label>
+    <label class="check-row"><input type="checkbox" id="emoji"> <span>文末に 🐈 🐱 を付ける</span></label>
+  </section>
+
+  <section class="card" id="model-card">
+    <h2>ねこ語モデル</h2>
+    <p class="model-name" id="model-id"></p>
+    <div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
+    <p class="status" id="model-status">未読み込み</p>
+    <div class="row">
+      <button id="load-btn">モデルを読み込む</button>
+      <button id="unload-btn" class="secondary">キャッシュを削除</button>
+    </div>
+    <p class="hint">初回はモデル（約 400MB）をダウンロードします。WebGPU が使える Firefox(141 以降。macOS は Apple Silicon)が必要です。</p>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <button id="rerun-btn" class="secondary">このページを再変換</button>
+    </div>
+    <p class="status">今日癒した言葉: <strong id="count">0</strong> 件</p>
+  </section>
+
+  <footer>
+    <a href="THIRD_PARTY_NOTICES.md" target="_blank">ライセンス表記</a>
+    <span>·</span>
+    <span>イラスト: いらすとや</span>
+  </footer>
+</body>
+<script type="module" src="popup.js"></script>
+</html>
