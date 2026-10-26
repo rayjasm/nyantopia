@@ -8,10 +8,12 @@ import {
   isTargeted, type BackgroundMessage, type ConvertResponse, type ErrorResponse, type ModelStatusResponse,
 } from "./shared/messages";
 import {
-  addTailEmojis, buildMessages, convertByRule, copiedExample, hasForeignChars, isConvertible, MAX_TOKENS, postProcess, retention,
-  splitSentences,
+  addTailEmojis, buildMessages, convertByRule, copiedExample, hasForeignChars, isAllowedRewrite, isConvertible, MAX_TOKENS, postProcess,
+  retention, splitSentences,
 } from "./shared/nyan";
-import { loadModelStatus, loadSettings, onSettingsChanged, saveModelStatus, type ModelStatus } from "./shared/settings";
+import {
+  CUSTOM_MODELS, isTunedModel, loadDevModelUrl, loadModelStatus, loadSettings, onSettingsChanged, saveModelStatus, type ModelStatus,
+} from "./shared/settings";
 import runtimeWasm from "./runtime-wasm.json";
 
 // ---------- モデルの管理 ----------
@@ -51,13 +53,17 @@ function friendlyError(err: unknown): string {
  * scripts/fetch-wasm.mjs でダウンロードして public/wasm/ に同梱している。
  * URL が http で始まらないと WebLLM はキャッシュを使わず直接 fetch する
  */
-function buildAppConfig(modelId: string): webllm.AppConfig {
-  const record = webllm.prebuiltAppConfig.model_list.find((m) => m.model_id === modelId);
-  if (!record) throw new Error(`WebLLM の設定に ${modelId} がありません`);
+async function buildAppConfig(modelId: string): Promise<webllm.AppConfig> {
+  // 独自モデルは、同じアーキテクチャの組み込みモデルの設定(wasm など)を流用し、重みの URL だけ差し替える
+  const custom = CUSTOM_MODELS[modelId];
+  const baseId = custom?.base ?? modelId;
+  const record = webllm.prebuiltAppConfig.model_list.find((m) => m.model_id === baseId);
+  if (!record) throw new Error(`WebLLM の設定に ${baseId} がありません`);
   const file = record.model_lib.split("/").pop() ?? "";
+  const modelUrl = custom ? ((await loadDevModelUrl()) ?? custom.model) : record.model;
   return {
     ...webllm.prebuiltAppConfig,
-    model_list: [{ ...record, model_lib: browser.runtime.getURL(`wasm/${file}`) }],
+    model_list: [{ ...record, model_id: modelId, model: modelUrl, model_lib: browser.runtime.getURL(`wasm/${file}`) }],
   };
 }
 
@@ -99,7 +105,7 @@ async function ensureModel(modelId: string): Promise<webllm.MLCEngine> {
       };
       resetHistory();
       await ensureRuntimeWasm();
-      appConfig = buildAppConfig(modelId);
+      appConfig = await buildAppConfig(modelId);
       if (!engine) {
         engine = await webllm.CreateMLCEngine(modelId, { initProgressCallback, appConfig });
       } else {
@@ -141,7 +147,7 @@ function resetHistory(): void {
 
 async function generate(eng: webllm.MLCEngine, text: string, temperature: number, seed?: number): Promise<string> {
   if (history.length >= MAX_HISTORY_TURNS * 2) resetHistory();
-  const base = buildMessages(text);
+  const base = buildMessages(text, isTunedModel(loadedModelId));
   const messages: webllm.ChatCompletionMessageParam[] = [
     ...(base.slice(0, -1) as webllm.ChatCompletionMessageParam[]),
     ...history,
@@ -193,11 +199,14 @@ async function convertSentence(eng: webllm.MLCEngine, sentence: string): Promise
   const trimmed = sentence.trim();
   if (!isConvertible(trimmed)) return { text: sentence, byRule: false };
 
+  // チューニング済みモデルは語尾の言い換えをするので、対応表の範囲に収まっているかで判定する。
+  // 素のモデルは「写して にゃ を付けるだけ」なので、文字が変わっていないかで判定する
+  const tuned = isTunedModel(loadedModelId);
   const bad = (t: string) =>
     !postProcess(t, false, trimmed) ||
-    copiedExample(t, trimmed) ||
-    hasForeignChars(trimmed, t) ||
-    retention(trimmed, t) < MIN_RETENTION;
+    (tuned
+      ? !isAllowedRewrite(trimmed, t)
+      : copiedExample(t, trimmed) || hasForeignChars(trimmed, t) || retention(trimmed, t) < MIN_RETENTION);
   // Qwen3 は thinking を無効にしても出力の先頭に空の <think></think> を付けるので、判定の前に外す
   let raw = await generate(eng, trimmed, 0);
   let out = stripThink(raw);
@@ -290,7 +299,7 @@ async function handle(msg: BackgroundMessage): Promise<Response> {
         loadedModelId = "";
       }
       try {
-        await webllm.deleteModelAllInfoInCache(msg.modelId, appConfig ?? buildAppConfig(msg.modelId));
+        await webllm.deleteModelAllInfoInCache(msg.modelId, appConfig ?? (await buildAppConfig(msg.modelId)));
       } catch (err) {
         // 同梱 wasm は Cache API の対象外なので、その削除に失敗しても無視する
         console.warn("[nyantopia] キャッシュ削除で警告:", err);
