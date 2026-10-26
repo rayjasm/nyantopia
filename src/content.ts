@@ -13,7 +13,10 @@ import { addCount, loadSettings, onSettingsChanged, type Settings } from "./shar
 const BATCH_SIZE = 4;
 /** 1 ページで LLM にかける単位の上限 */
 const MAX_UNITS_LLM = 300;
-/** 1 単位(<br> でつながったテキストのまとまり)の最大文字数。長いものは丸ごとスキップする */
+/**
+ * 1 単位(<br> でつながったテキストのまとまり)の目安の最大文字数。
+ * これを超えるまとまりは文の切れ目(<br> の前が句点など)で分割する。それでも超える単位はルール変換だけにして LLM には送らない
+ */
 const MAX_TEXT_LENGTH = 300;
 /** 画面の高さの何倍以内にあれば「画面に近い」として LLM にかけるか */
 const NEAR_VIEWPORT = 1.5;
@@ -90,6 +93,31 @@ function continuesAfter(prev: Text, next: Text): boolean {
   return sib === next;
 }
 
+/**
+ * <br> でつながった長いまとまりを、文の切れ目で MAX_TEXT_LENGTH 以下の単位に分ける。
+ * ニュース記事などは本文全体が 1 つの <p> に <br> 区切りで入っていることがあり、そのままでは 1 単位が長すぎる
+ */
+function splitLongGroup(nodes: Text[]): Text[][] {
+  const len = (n: Text) => (n.nodeValue ?? "").trim().length;
+  if (nodes.reduce((sum, n) => sum + len(n), 0) <= MAX_TEXT_LENGTH) return [nodes];
+  const groups: Text[][] = [];
+  let group: Text[] = [];
+  let groupLen = 0;
+  for (const node of nodes) {
+    const last = group[group.length - 1];
+    const endsSentence = last !== undefined && /[。！？!?」』）)]\s*$/u.test(last.nodeValue ?? "");
+    if (group.length > 0 && endsSentence && groupLen + len(node) > MAX_TEXT_LENGTH) {
+      groups.push(group);
+      group = [];
+      groupLen = 0;
+    }
+    group.push(node);
+    groupLen += len(node);
+  }
+  if (group.length > 0) groups.push(group);
+  return groups;
+}
+
 /** root 以下の、まだ変換していないテキストを単位にまとめて返す */
 function collectUnits(root: Node): Unit[] {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -104,11 +132,13 @@ function collectUnits(root: Node): Unit[] {
   let prevNode: Text | null = null;
   const flush = () => {
     if (current.length === 0) return;
-    // 空白だけのノードは単位の先頭・末尾から外す
-    while (current.length > 1 && !(current[0].nodeValue ?? "").trim()) current.shift();
-    while (current.length > 1 && !(current[current.length - 1].nodeValue ?? "").trim()) current.pop();
-    const text = current.map((n) => n.nodeValue ?? "").join("");
-    if (isConvertible(text) && text.trim().length <= MAX_TEXT_LENGTH) units.push({ nodes: current, text });
+    for (let group of splitLongGroup(current)) {
+      // 空白だけのノードは単位の先頭・末尾から外す
+      while (group.length > 1 && !(group[0].nodeValue ?? "").trim()) group = group.slice(1);
+      while (group.length > 1 && !(group[group.length - 1].nodeValue ?? "").trim()) group = group.slice(0, -1);
+      const text = group.map((n) => n.nodeValue ?? "").join("");
+      if (isConvertible(text)) units.push({ nodes: group, text });
+    }
     current = [];
   };
   let n: Node | null;
@@ -124,13 +154,14 @@ function collectUnits(root: Node): Unit[] {
 
 // ---------- 書き込み ----------
 
-/** 「にゃ」「絵文字」「句読点」「空白」の連続かどうか */
-const FILLER = /[\sにゃんあー〜～。、！？!?,.「」『』…\p{Extended_Pictographic}️]/u;
+/** 「にゃ」「絵文字」「句読点」「空白」の連続(ノード境界の後ろに付いていてよいもの) */
+const FILLER_RUN = /^(?:にゃ[んあー〜～]?|[\s。、！？!?,.「」『』…〜～ー]|\p{Extended_Pictographic}\uFE0F?)+/u;
 
 /**
  * 変換結果を元のノード境界に合わせて配り直す。
- * 変換は「写して にゃ を付け足す」だけなので、各ノードの文字列(にゃ・句読点を除く)が
- * 出力の先頭から順に現れるはず。見つからなければ残り全部をそのノードに入れる
+ * 変換は「写して にゃ を付け足す」だけなので、各ノードの文字列(にゃ・句読点・絵文字を除く)が
+ * 出力の先頭から順に現れるはず。比較は stripForCompare でそろえる(「に」「ん」のような 1 文字は本文として扱う)。
+ * 見つからなければ残り全部をそのノードに入れる
  */
 function distribute(unit: Unit, converted: string): string[] {
   const pieces: string[] = [];
@@ -146,24 +177,23 @@ function distribute(unit: Unit, converted: string): string[] {
       pieces.push(original);
       continue;
     }
-    let acc = "";
     let cut = -1;
-    for (let k = 0; k < rest.length; k++) {
-      const ch = rest[k];
-      if (!FILLER.test(ch)) acc += ch;
-      if (acc === target) {
-        let end = k + 1;
-        while (end < rest.length && FILLER.test(rest[end])) end++;
-        cut = end;
+    for (let k = 1; k <= rest.length; k++) {
+      const got = stripForCompare(rest.slice(0, k));
+      if (got === target) {
+        cut = k;
         break;
       }
-      if (!target.startsWith(acc)) break;
+      // 「にゃ」の途中で一時的に長くなることがあるので、少し余裕を見てから諦める
+      if (got.length > target.length + 3) break;
     }
     if (cut < 0) {
       pieces.push(rest);
       rest = "";
       continue;
     }
+    // ノードの文字列の直後に付いた「にゃ」や句読点、絵文字は同じノードに含める
+    cut += rest.slice(cut).match(FILLER_RUN)?.[0].length ?? 0;
     pieces.push(rest.slice(0, cut));
     rest = rest.slice(cut);
   }
@@ -201,7 +231,8 @@ function handleUnits(units: Unit[]): void {
     const ruleText = cached ?? convertByRule(text, settings.emoji);
     if (!writeUnit(unit, ruleText)) continue;
     if (ruleText !== text) converted++;
-    if (settings.engine === "llm" && cached === undefined) pending.push(unit);
+    // 文の切れ目で分けても長すぎる単位はルール変換のままにする(小型モデルは長文を崩しやすい)
+    if (settings.engine === "llm" && cached === undefined && text.length <= MAX_TEXT_LENGTH) pending.push(unit);
   }
   if (converted > 0) void addCount(converted);
   kick();
