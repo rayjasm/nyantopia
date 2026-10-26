@@ -25,6 +25,15 @@ const SKIP_TAGS = new Set([
   "H1", "H2", "H3", "H4", "H5", "H6", "TITLE",
 ]);
 
+/**
+ * 変換しない UI 部品の WAI-ARIA ロール。
+ * 検索窓の入力候補(listbox / option)やメニューは文章ではなく、変換すると操作の邪魔になる
+ */
+const SKIP_ROLES = new Set([
+  "listbox", "option", "combobox", "menu", "menubar", "menuitem", "menuitemcheckbox", "menuitemradio",
+  "tree", "treeitem", "tablist", "tab", "tooltip", "searchbox", "textbox", "spinbutton", "slider", "progressbar",
+]);
+
 /** <br> や空白でつながった連続するテキストノードを 1 つの単位として扱う */
 interface Unit {
   nodes: Text[];
@@ -50,6 +59,8 @@ let llmCount = 0;
 
 function shouldSkipElement(el: Element): boolean {
   if (SKIP_TAGS.has(el.tagName)) return true;
+  const role = el.getAttribute("role");
+  if (role && SKIP_ROLES.has(role)) return true;
   if ((el as HTMLElement).isContentEditable) return true;
   if (el.closest("[data-nyantopia-ignore]")) return true;
   return false;
