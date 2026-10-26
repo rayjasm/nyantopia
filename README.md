@@ -71,5 +71,5 @@ The extension is bundled with esbuild. To reproduce the distributed package from
 利用している外部のライブラリ、モデル、素材のライセンスは [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) にまとめています。
 
 - [WebLLM](https://github.com/mlc-ai/web-llm): Apache License 2.0。拡張機能にバンドルして配布しています
-- [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B): Apache License 2.0。利用者のブラウザが Hugging Face から直接ダウンロードします
+- [nyantopia-Qwen3-0.6B](https://huggingface.co/jasmray/nyantopia-Qwen3-0.6B-q4f16_1-MLC)([Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) をねこ語向けに学習させたもの): Apache License 2.0。利用者のブラウザが Hugging Face から直接ダウンロードします
 - アイコンの肉球イラスト: [いらすとや](https://www.irasutoya.com/) の素材を[利用規約](https://www.irasutoya.com/p/terms.html)の範囲で利用しています。著作権は作者に帰属し、MIT ライセンスの対象外です
