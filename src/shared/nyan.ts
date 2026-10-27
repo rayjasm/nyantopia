@@ -125,6 +125,8 @@ export function normalizeParticles(text: string): string {
   return text
     // 「〜ませんか？にゃ」のように句読点の後ろに付いた「にゃ」は前に移す
     .replace(/([。！？!?]+)\s*(にゃ[んあー〜～]?)/gu, "$2$1")
+    // 「断れなかった…にゃ」のように三点リーダーや波線の後ろに付いた「にゃ」も前に移す(「断れなかったにゃ…」)
+    .replace(/([…‥〜～]+)\s*(にゃ[んあー]?)/gu, "$2$1")
     // 「ワロタwにゃ」「おっそい（笑）にゃ」のようにスラングの記号の後ろに付いた「にゃ」は前に移す
     .replace(new RegExp(`(${SLANG_TAIL})\\s*(にゃ[んあー〜～]?)`, "gu"), "$2$1")
     // 「だよにゃ」「ですねにゃ」→「だにゃ」「ですにゃ」
@@ -178,12 +180,24 @@ export function ensureNyan(text: string): string {
     const tail = m[2] || "";
     // 空、または「は？」のような 1 文字の相づちは触らない
     if (body.trim().length <= 1) return seg;
+    // 日本語を含まない文(「Yahoo!ニュース」の「Yahoo!」、英語の感嘆文)には付けない。LLM の経路と同じ判定
+    if (!hasJapanese(seg)) return seg;
     // 日付やラベルのような文でないものには付けない
     if (!looksLikeSentence(seg)) return seg;
     if (/(にゃ|にゃん|にゃあ|にゃー|にゃ〜|にゃ～)$/u.test(body)) return seg;
     return normalizeParticles(body + "にゃ") + tail;
   });
-  return fixed.join("");
+  return moveNyanIntoQuotes(fixed.join(""));
+}
+
+/**
+ * 「もう帰る」にゃ → 「もう帰るにゃ」のように、かぎかっこで閉じた発話の後ろに付いた「にゃ」を中に入れる。
+ * 中身が文(述語で終わる)のときだけ。「タイトルは『春』にゃ」のような名詞の引用はそのまま
+ */
+export function moveNyanIntoQuotes(text: string): string {
+  return text.replace(/([「『])([^「」『』]*?)([」』])\s*(にゃ[んあー〜～]?)/gu, (m, open, inner, close, nyan) =>
+    looksLikeSentence(inner) ? `${open}${normalizeParticles(inner + nyan)}${close}` : m,
+  );
 }
 
 /** LLM の出力を整える。input を渡すと、元の文にあったかぎかっこは残す */
@@ -219,18 +233,20 @@ export function postProcess(text: string, emoji: boolean, input?: string): strin
 
 /** 各文の終わりに 🐈 / 🐱 を付ける。句点「。」は絵文字に置き換え、「！」「？」は残す */
 export function addTailEmojis(text: string): string {
-  const re = new RegExp(`^(.*?)(${SLANG_TAIL}?)([。！？!?]*)(\\n?)$`, "su");
+  // 文末の句読点・三点リーダーの後ろに絵文字を付ける(「断れなかったにゃ…🐱」)。
+  // かぎかっこで閉じた発話では、絵文字もかっこの中に入れる(「もう帰るにゃ🐱」)
+  const re = new RegExp(`^(.*?)(${SLANG_TAIL}?)([。！？!?…‥]*)([」』]*)(\\n?)$`, "su");
   return splitSentences(text)
     .map((seg) => {
       const m = seg.match(re);
       if (!m) return seg;
-      const [, body, slang, punct, nl] = m;
+      const [, body, slang, punct, closeQuotes, nl] = m;
       // 空、または「は？」のような 1 文字の相づちには付けない
       if (body.trim().length <= 1) return seg;
       // 変換されていない(にゃ で終わっていない)文には付けない
       if (!/(にゃ|にゃん|にゃあ|にゃー|にゃ〜|にゃ～)$/u.test(body)) return seg;
       if (/\p{Extended_Pictographic}️?\s*$/u.test(body)) return seg;
-      return body + slang + punct.replace(/。/g, "") + pickEmoji(body) + nl;
+      return body + slang + punct.replace(/。/g, "") + pickEmoji(body) + closeQuotes + nl;
     })
     .join("");
 }
@@ -265,9 +281,10 @@ export function looksLikeSentence(text: string): boolean {
   t = t.replace(/[（(][^（）()]*[）)]\s*$/u, "").trim();
   // 末尾の絵文字・記号・空白を外す
   t = t.replace(/[\s\p{Extended_Pictographic}\uFE0F…〜～ー♪♡♥★☆]+$/u, "");
+  // 閉じかっこは中身で判断する(「もう帰る。」のように句点がかっこの中にあることがあるので、先に外す)
+  t = t.replace(/[」』）)]+$/u, "");
   const endsWithPunct = /[。！？!?]$/u.test(t);
   t = t.replace(/[。！？!?]+$/u, "").trim();
-  // 閉じかっこは中身で判断する
   t = t.replace(/[」』）)]+$/u, "");
   if (t.length < 2) return false;
   if (UI_LABELS.has(t)) return false;
@@ -279,6 +296,9 @@ export function looksLikeSentence(text: string): boolean {
   if (endsWithPunct) return true;
   // ネットスラングの文末
   if (/(草|w+|笑)$/u.test(t)) return true;
+  // 「い」を省いた形容詞(「説明おっそ」「これやば」)と、よく使う命令形(「言え」「急げ」。「え」で終わる名詞と区別できないので個別に)
+  if (/(やば|すご|すげ|うま|はや|おそ|おっそ|でか|こわ|たか|たっか|やす|やっす|きも|えぐ|しんど|ねむ|だる|さむ|あつ|いた|くさ|まず|うざ|ださ|むず|つら|きつ|きっつ)$/u.test(t)) return true;
+  if (/(言え|追え|買え|払え|使え|会え|笑え|急げ|飛べ|遊べ|学べ|選べ|呼べ|叫べ|帰れ|消えろ)$/u.test(t)) return true;
   // 典型的な文末表現
   if (/(けど|けれど|から|ので|のに|って|じゃん|やん|っす|かも|かな|よね|だね|たい|ない|てる|です|ます|でした|ました|ません|だろ|でしょ|ろ|れ|ね|な|よ|ぞ|ぜ|わ|か|の|さ|や)$/u.test(t)) return true;
   // 動詞・形容詞・助動詞の終止形は う段、た/だ、い、ん で終わる。命令形は け/て を許容する
