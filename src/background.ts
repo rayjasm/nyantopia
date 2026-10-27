@@ -12,7 +12,8 @@ import {
   retention, splitSentences,
 } from "./shared/nyan";
 import {
-  CUSTOM_MODELS, isTunedModel, loadDevModelUrl, loadModelStatus, loadSettings, onSettingsChanged, saveModelStatus, type ModelStatus,
+  CUSTOM_MODELS, isTunedModel, loadDevModelUrl, loadModelStatus, loadSettings, onSettingsChanged, removeLegacyCounts, saveModelStatus,
+  type ModelStatus,
 } from "./shared/settings";
 import runtimeWasm from "./runtime-wasm.json";
 
@@ -350,4 +351,5 @@ window.addEventListener("pagehide", () => {
 void (async () => {
   await setStatus({ state: "idle", modelId: "", text: "未読み込み" });
   await updateBadge((await loadSettings()).enabled);
+  await removeLegacyCounts();
 })();

@@ -7,7 +7,7 @@
 
 import type { ConvertRequest, ConvertResponse, ContentCommand, ErrorResponse } from "./shared/messages";
 import { convertByRule, isConvertible, stripForCompare } from "./shared/nyan";
-import { addCount, loadSettings, onSettingsChanged, type Settings } from "./shared/settings";
+import { loadSettings, onSettingsChanged, type Settings } from "./shared/settings";
 
 /** 一度に LLM に送る単位の数 */
 const BATCH_SIZE = 4;
@@ -224,17 +224,14 @@ function writeUnit(unit: Unit, converted: string): boolean {
 
 /** 集めた単位にまずルール変換を適用し、LLM モードなら待ち行列に入れる */
 function handleUnits(units: Unit[]): void {
-  let converted = 0;
   for (const unit of units) {
     const text = unit.text.trim();
     const cached = settings.engine === "llm" ? llmCache.get(text) : undefined;
     const ruleText = cached ?? convertByRule(text, settings.emoji);
     if (!writeUnit(unit, ruleText)) continue;
-    if (ruleText !== text) converted++;
     // 文の切れ目で分けても長すぎる単位はルール変換のままにする(小型モデルは長文を崩しやすい)
     if (settings.engine === "llm" && cached === undefined && text.length <= MAX_TEXT_LENGTH) pending.push(unit);
   }
-  if (converted > 0) void addCount(converted);
   kick();
 }
 

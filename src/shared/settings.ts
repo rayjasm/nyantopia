@@ -91,24 +91,7 @@ export function onModelStatusChanged(cb: (s: ModelStatus) => void): void {
   });
 }
 
-/** 変換した文の累計(日付ごと) */
-const COUNT_KEY = "counts";
-
-function todayKey(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-export async function addCount(n: number): Promise<number> {
-  const got = await browser.storage.local.get(COUNT_KEY);
-  const counts = (got[COUNT_KEY] as Record<string, number> | undefined) ?? {};
-  const key = todayKey();
-  counts[key] = (counts[key] ?? 0) + n;
-  await browser.storage.local.set({ [COUNT_KEY]: counts });
-  return counts[key];
-}
-
-export async function getTodayCount(): Promise<number> {
-  const got = await browser.storage.local.get(COUNT_KEY);
-  const counts = (got[COUNT_KEY] as Record<string, number> | undefined) ?? {};
-  return counts[todayKey()] ?? 0;
+/** 以前のバージョンが保存していた「今日癒した言葉」の件数を消す(v0.3.2 で機能を削除) */
+export async function removeLegacyCounts(): Promise<void> {
+  await browser.storage.local.remove("counts");
 }

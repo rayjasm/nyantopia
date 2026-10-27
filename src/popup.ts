@@ -3,7 +3,7 @@
 import type { Tabs } from "webextension-polyfill";
 import type { ClearCacheRequest, ContentCommand, ErrorResponse, LoadModelRequest } from "./shared/messages";
 import {
-  getTodayCount, loadModelStatus, loadSettings, onModelStatusChanged, onSettingsChanged, saveSettings,
+  loadModelStatus, loadSettings, onModelStatusChanged, onSettingsChanged, saveSettings,
   type Engine, type ModelStatus, type Settings,
 } from "./shared/settings";
 
@@ -17,7 +17,6 @@ const modelStatusEl = $<HTMLParagraphElement>("model-status");
 const loadBtn = $<HTMLButtonElement>("load-btn");
 const unloadBtn = $<HTMLButtonElement>("unload-btn");
 const rerunBtn = $<HTMLButtonElement>("rerun-btn");
-const countEl = $<HTMLElement>("count");
 
 let settings: Settings;
 
@@ -36,10 +35,6 @@ function renderStatus(st: ModelStatus): void {
   loadBtn.textContent = st.state === "ready" ? "読み込み済み" : st.state === "loading" ? "読み込み中…" : "モデルを読み込む";
 }
 
-async function refreshCount(): Promise<void> {
-  countEl.textContent = String(await getTodayCount());
-}
-
 async function activeTab(): Promise<Tabs.Tab | undefined> {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   return tab;
@@ -50,16 +45,12 @@ async function init(): Promise<void> {
   settings = await loadSettings();
   renderSettings(settings);
   renderStatus(await loadModelStatus());
-  await refreshCount();
 
   onSettingsChanged((s) => {
     settings = s;
     renderSettings(s);
   });
   onModelStatusChanged(renderStatus);
-  browser.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes.counts) void refreshCount();
-  });
 
   enabledEl.addEventListener("change", async () => {
     await saveSettings({ enabled: enabledEl.checked });
