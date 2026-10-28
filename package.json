@@ -1,6 +1,6 @@
 {
   "name": "nyantopia-firefox",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "悪口のないやさしい世界。きつい言葉をねこ語に変換するブラウザ拡張機能(Firefox 版)",
   "scripts": {
     "build": "node build.mjs",

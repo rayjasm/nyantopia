@@ -1,58 +1,16 @@
 // ねこ語変換のプロンプトと後処理。nyanyaku (https://github.com/rayjasm/nyanyaku) から移植
 // DOM や browser API に依存しない純粋な関数だけを置く
 
-export const BASE_INSTRUCTION = `あなたは日本語の文を「ねこ語」にする変換器です。
-入力された文を一文字も変えずにそのまま書き写し、文の終わりに「にゃ」を付け足してください。
-
-ルール:
-- 文の言葉、語順、漢字、数字、記号はすべてそのまま。言葉を足さない、削らない、言い換えない、要約しない
-- 文末の言葉(「です」「ます」「ない」「た」「よ」「な」など)もそのまま残し、その直後に「にゃ」を付け足す
-- 文が複数あるときは、それぞれの文の終わりに「にゃ」を付け足す
-- きつい言葉や悪口もそのまま残す。やわらげない
-- 出力は変換した文だけ。説明、ラベル、引用符は書かない`;
-
-// few-shot の例。答えは「元の文をそのまま写して、にゃ を付け足しただけ」になっていること
-// (終助詞の置き換えなどは後処理の normalizeParticles で行うので、モデルには写すことだけをさせる)
-export const FEWSHOT: [string, string][] = [
-  ["今日は疲れたので早く帰ります", "今日は疲れたので早く帰りますにゃ"],
-  ["明日は朝から会議です", "明日は朝から会議ですにゃ"],
-  ["お前マジで使えないな", "お前マジで使えないなにゃ"],
-  ["仕事が遅すぎて話にならない", "仕事が遅すぎて話にならないにゃ"],
-  ["新機能のリリースは来週の火曜日を予定しています", "新機能のリリースは来週の火曜日を予定していますにゃ"],
-  ["二度と話しかけてくるな", "二度と話しかけてくるなにゃ"],
-];
-
 export const MAX_TOKENS = 256;
 
-export interface ChatMessage {
-  role: "user" | "assistant" | "system";
-  content: string;
-}
-
 /**
- * チューニング済みモデル(nyantopia-model で学習したもの)向けの指示。学習時の system プロンプトと同じ文にする。
- * 言い換えを学習済みなので few-shot は付けない(prefill が短くなり速い)
+ * ねこ語モデル(llm-jp-3-150m を学習させたもの)向けのプロンプト。モデル既定の指示/応答形式で、学習(trl)ではこの文字列全体を
+ * 1 つの文字列として符号化している(BOS は先頭の <s> の 1 個だけ)。WebLLM でも chat API ではなく completions API に
+ * この文字列を渡して、学習時と同じトークン列にする(chat API は system / user / assistant を別々に符号化するので、
+ * 「###」の前に ▁ が入るかどうかが学習時と変わってしまう)
  */
-export const TUNED_INSTRUCTION =
-  "あなたは日本語の文を「ねこ語」にする変換器です。" +
-  "文の内容は変えず、文末の命令や禁止、きつい断定だけをやわらかい形にして、文の終わりに「にゃ」を付けてください。" +
-  "ふつうの文はそのまま写して「にゃ」を付けるだけにします。出力は変換した文だけを書きます。";
-
-/** WebLLM 向けのメッセージ列を組み立てる。tuned はチューニング済みモデル用(few-shot なし) */
-export function buildMessages(text: string, tuned = false): ChatMessage[] {
-  if (tuned) {
-    return [
-      { role: "system", content: TUNED_INSTRUCTION },
-      { role: "user", content: text },
-    ];
-  }
-  const messages: ChatMessage[] = [{ role: "system", content: BASE_INSTRUCTION }];
-  for (const [q, a] of FEWSHOT) {
-    messages.push({ role: "user", content: q });
-    messages.push({ role: "assistant", content: a });
-  }
-  messages.push({ role: "user", content: text });
-  return messages;
+export function buildLlmjpPrompt(text: string): string {
+  return `<s>以下は、タスクを説明する指示です。要求を適切に満たす応答を書きなさい。\n\n### 指示:\n${text}\n\n### 応答:\n`;
 }
 
 const OPEN_BRACKETS = "「『（(［[【〈《“\"";
@@ -92,28 +50,6 @@ export function stripForCompare(s: string): string {
     .replace(/\p{Extended_Pictographic}\uFE0F?/gu, "");
 }
 
-function levenshtein(a: string, b: string): number {
-  const prev = new Array<number>(b.length + 1);
-  const cur = new Array<number>(b.length + 1);
-  for (let j = 0; j <= b.length; j++) prev[j] = j;
-  for (let i = 1; i <= a.length; i++) {
-    cur[0] = i;
-    for (let j = 1; j <= b.length; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    }
-    for (let j = 0; j <= b.length; j++) prev[j] = cur[j];
-  }
-  return prev[b.length];
-}
-
-/** 元の文がどれだけ保たれているか(1.0 で完全一致)。「にゃ」や句読点の違いは無視する */
-export function retention(input: string, output: string): number {
-  const a = stripForCompare(input);
-  const b = stripForCompare(output);
-  if (a.length === 0) return 1;
-  return Math.max(0, 1 - levenshtein(a, b) / Math.max(a.length, b.length));
-}
-
 /**
  * 「ワロタw」「おっそい（笑）」「うける笑」のように、文の後ろに付くネットスラングの記号。
  * 「にゃ」はこの前に置く。英単語の末尾の w や「爆笑」の笑は対象にしない
@@ -123,30 +59,18 @@ const SLANG_TAIL = "(?:(?<![A-Za-z])[wｗ]+|[（(]笑[）)]|(?<!\\p{Script=Han})
 /** 「〜よにゃ」「〜ないなにゃ」のように終助詞の直後に付いた「にゃ」を自然な形に整える */
 export function normalizeParticles(text: string): string {
   return text
-    // 「〜ませんか？にゃ」のように句読点の後ろに付いた「にゃ」は前に移す
+    // 「ワロタwにゃ」「おっそい（笑）にゃ」のようにスラングの記号の後ろに付いた「にゃ」は前に移す
+    .replace(new RegExp(`(${SLANG_TAIL})\\s*(にゃ[んあー〜～]?)`, "gu"), "$2$1")
+    // 「〜ませんか？にゃ」のように句読点の後ろに付いた「にゃ」は前に移す(「さぁ?wにゃ」→「さぁにゃ?w」になるよう、スラングの後に行う)
     .replace(/([。！？!?]+)\s*(にゃ[んあー〜～]?)/gu, "$2$1")
     // 「断れなかった…にゃ」のように三点リーダーや波線の後ろに付いた「にゃ」も前に移す(「断れなかったにゃ…」)
     .replace(/([…‥〜～]+)\s*(にゃ[んあー]?)/gu, "$2$1")
-    // 「ワロタwにゃ」「おっそい（笑）にゃ」のようにスラングの記号の後ろに付いた「にゃ」は前に移す
-    .replace(new RegExp(`(${SLANG_TAIL})\\s*(にゃ[んあー〜～]?)`, "gu"), "$2$1")
     // 「だよにゃ」「ですねにゃ」→「だにゃ」「ですにゃ」
     .replace(/[よねぞぜわ]にゃ/gu, "にゃ")
     // 「ないなにゃ」「だなにゃ」→「ないにゃ」「だにゃ」(「くるなにゃ」のような禁止の な は残す)
     .replace(/(?<=[いだ])なにゃ/gu, "にゃ")
     // 「にゃにゃ」「にゃ？にゃ？」「にゃ？にゃ」のような重複を最初の 1 つにする
     .replace(/(にゃ[！？!?。]?)(?:\s*にゃ[！？!?。]?)+/gu, "$1");
-}
-
-/**
- * 出力に、元の文にない文字(「にゃ」や句読点・絵文字を除く)が混ざっていないか。
- * 「写して付け足す」だけのはずなので、新しい文字が出てきたら崩れている
- */
-export function hasForeignChars(input: string, output: string): boolean {
-  const allowed = new Set(stripForCompare(input));
-  for (const ch of stripForCompare(output)) {
-    if (!allowed.has(ch)) return true;
-  }
-  return false;
 }
 
 const TAIL_EMOJIS = ["🐈", "🐱"];
@@ -156,12 +80,6 @@ function pickEmoji(body: string): string {
   let h = 0;
   for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
   return TAIL_EMOJIS[h % TAIL_EMOJIS.length];
-}
-
-/** 例の答えをそのまま返してきた (入力が違うのに) かどうか */
-export function copiedExample(outText: string, inText: string): boolean {
-  const norm = (x: string) => x.replace(/\s+/g, "");
-  return FEWSHOT.some(([q, a]) => norm(a) === norm(outText) && norm(q) !== norm(inText));
 }
 
 /** 出力が入力とほぼ同じ (変換されていない) */
@@ -208,8 +126,8 @@ export function postProcess(text: string, emoji: boolean, input?: string): strin
   // 先頭のラベルを除去
   t = t.replace(/^(変換後|出力|ねこ語|にゃん訳|結果)\s*[:：]\s*/u, "");
   // モデルが勝手に付けた、全体を囲む引用符を除去(元の文が引用符で始まる場合は残す)
-  if (!input || !/^[「『"“]/u.test(input)) t = t.replace(/^[「『"“]+/u, "");
-  if (!input || !/[」』"”]$/u.test(input)) t = t.replace(/[」』"”]+$/u, "");
+  if (!input || !/^[「『"“]/u.test(input.trim())) t = t.replace(/^[「『"“]+/u, "");
+  if (!input || !/[」』"”]$/u.test(input.trim())) t = t.replace(/[」』"”]+$/u, "");
   t = t.trim();
   if (!t) return t;
 
@@ -235,18 +153,18 @@ export function postProcess(text: string, emoji: boolean, input?: string): strin
 export function addTailEmojis(text: string): string {
   // 文末の句読点・三点リーダーの後ろに絵文字を付ける(「断れなかったにゃ…🐱」)。
   // かぎかっこで閉じた発話では、絵文字もかっこの中に入れる(「もう帰るにゃ🐱」)
-  const re = new RegExp(`^(.*?)(${SLANG_TAIL}?)([。！？!?…‥]*)([」』]*)(\\n?)$`, "su");
+  const re = new RegExp(`^(.*?)([。！？!?…‥]*)(${SLANG_TAIL}?)([。！？!?…‥]*)([」』]*)(\\s*)$`, "su");
   return splitSentences(text)
     .map((seg) => {
       const m = seg.match(re);
       if (!m) return seg;
-      const [, body, slang, punct, closeQuotes, nl] = m;
+      const [, body, punct1, slang, punct2, closeQuotes, trail] = m;
       // 空、または「は？」のような 1 文字の相づちには付けない
       if (body.trim().length <= 1) return seg;
       // 変換されていない(にゃ で終わっていない)文には付けない
       if (!/(にゃ|にゃん|にゃあ|にゃー|にゃ〜|にゃ～)$/u.test(body)) return seg;
       if (/\p{Extended_Pictographic}️?\s*$/u.test(body)) return seg;
-      return body + slang + punct.replace(/。/g, "") + pickEmoji(body) + closeQuotes + nl;
+      return body + punct1.replace(/。/g, "") + slang + punct2.replace(/。/g, "") + pickEmoji(body) + closeQuotes + trail;
     })
     .join("");
 }
@@ -286,6 +204,8 @@ export function looksLikeSentence(text: string): boolean {
   const endsWithPunct = /[。！？!?]$/u.test(t);
   t = t.replace(/[。！？!?]+$/u, "").trim();
   t = t.replace(/[」』）)]+$/u, "");
+  // 「！？」のように中身が記号だけのかぎかっこは文ではない
+  if (/[「『（(]$/u.test(t)) return false;
   if (t.length < 2) return false;
   if (UI_LABELS.has(t)) return false;
   // 「返信する」「コメントを追加する」のような動作ラベル(助詞が「を」だけで、漢字・カタカナ + する)

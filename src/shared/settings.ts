@@ -13,18 +13,29 @@ export interface Settings {
   modelId: string;
 }
 
-/** 素の Qwen3-0.6B(WebLLM の組み込み設定にあるもの) */
-export const BASE_MODEL_ID = "Qwen3-0.6B-q4f16_1-MLC";
-/** 語尾の言い換えを学習させたモデル(nyantopia-model で作成。重みだけ差し替え、wasm は BASE と共通) */
-export const TUNED_MODEL_ID = "nyantopia-Qwen3-0.6B-q4f16_1-MLC";
-/** 独自モデルの設定。model は重みの置き場所、base は WebLLM の組み込み設定のうち流用する元 */
-export const CUSTOM_MODELS: Record<string, { base: string; model: string }> = {
-  [TUNED_MODEL_ID]: { base: BASE_MODEL_ID, model: "https://huggingface.co/jasmray/nyantopia-Qwen3-0.6B-q4f16_1-MLC" },
-};
-export function isTunedModel(modelId: string): boolean {
-  return modelId in CUSTOM_MODELS;
+/** ねこ語モデル(llm-jp-3-150m-instruct3 に語尾の言い換えを学習させたもの。nyantopia-model で作成) */
+export const LLMJP_MODEL_ID = "nyantopia-llm-jp-3-150m-q4f16_1-MLC";
+
+/** モデルの定義。model は重みの置き場所、lib は同梱する実行用 wasm(public/wasm/)と WebLLM に伝える必要メモリの目安(MB) */
+export interface ModelDef {
+  model: string;
+  lib: { file: string; vramMB: number };
 }
-export const DEFAULT_MODEL_ID = TUNED_MODEL_ID;
+
+export const MODELS: Record<string, ModelDef> = {
+  [LLMJP_MODEL_ID]: {
+    model: "https://huggingface.co/jasmray/nyantopia-llm-jp-3-150m-q4f16_1-MLC",
+    // 重み 86MB + KV キャッシュなど。wasm は nyantopia-model の scripts/compile_webgpu.sh で作ったもの
+    lib: { file: "nyantopia-llm-jp-3-150m-q4f16_1_cs1k-webgpu.wasm", vramMB: 300 },
+  },
+};
+export const DEFAULT_MODEL_ID = LLMJP_MODEL_ID;
+
+/** 以前のバージョン(〜0.3.2)が使っていた Qwen3 のモデル。初回起動時にキャッシュした重みを消す */
+export const LEGACY_MODELS = [
+  { model_id: "Qwen3-0.6B-q4f16_1-MLC", model: "https://huggingface.co/mlc-ai/Qwen3-0.6B-q4f16_1-MLC" },
+  { model_id: "nyantopia-Qwen3-0.6B-q4f16_1-MLC", model: "https://huggingface.co/jasmray/nyantopia-Qwen3-0.6B-q4f16_1-MLC" },
+];
 
 /** 開発用: 独自モデルの重みをローカルサーバーなどから取る(browser.storage.local の devModelUrl) */
 export async function loadDevModelUrl(): Promise<string | undefined> {
@@ -42,9 +53,16 @@ export const DEFAULT_SETTINGS: Settings = {
 
 const KEY = "settings";
 
+/** 保存された設定に既定値を補う。以前のバージョンのモデル ID が残っていれば今の既定に置き換える */
+function withDefaults(stored: unknown): Settings {
+  const s = { ...DEFAULT_SETTINGS, ...((stored ?? {}) as Partial<Settings>) };
+  if (!(s.modelId in MODELS)) s.modelId = DEFAULT_MODEL_ID;
+  return s;
+}
+
 export async function loadSettings(): Promise<Settings> {
   const got = await browser.storage.local.get(KEY);
-  return { ...DEFAULT_SETTINGS, ...(got[KEY] ?? {}) };
+  return withDefaults(got[KEY]);
 }
 
 export async function saveSettings(patch: Partial<Settings>): Promise<Settings> {
@@ -57,7 +75,7 @@ export async function saveSettings(patch: Partial<Settings>): Promise<Settings> 
 export function onSettingsChanged(cb: (s: Settings) => void): void {
   browser.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes[KEY]) {
-      cb({ ...DEFAULT_SETTINGS, ...(changes[KEY].newValue ?? {}) });
+      cb(withDefaults(changes[KEY].newValue));
     }
   });
 }

@@ -8,11 +8,10 @@ import {
   isTargeted, type BackgroundMessage, type ConvertResponse, type ErrorResponse, type ModelStatusResponse,
 } from "./shared/messages";
 import {
-  addTailEmojis, buildMessages, convertByRule, copiedExample, hasForeignChars, isAllowedRewrite, isConvertible, MAX_TOKENS, postProcess,
-  retention, splitSentences,
+  addTailEmojis, buildLlmjpPrompt, convertByRule, isAllowedRewrite, isConvertible, MAX_TOKENS, postProcess, splitSentences,
 } from "./shared/nyan";
 import {
-  CUSTOM_MODELS, isTunedModel, loadDevModelUrl, loadModelStatus, loadSettings, onSettingsChanged, removeLegacyCounts, saveModelStatus,
+  LEGACY_MODELS, loadDevModelUrl, loadModelStatus, loadSettings, MODELS, onSettingsChanged, removeLegacyCounts, saveModelStatus,
   type ModelStatus,
 } from "./shared/settings";
 import runtimeWasm from "./runtime-wasm.json";
@@ -49,23 +48,40 @@ function friendlyError(err: unknown): string {
 }
 
 /**
- * WebLLM の組み込み設定をもとに、モデル実行用の wasm を拡張機能内のファイルに差し替えた設定を作る。
- * addons.mozilla.org のポリシーでも外部から実行コードを取得できないため、
- * scripts/fetch-wasm.mjs でダウンロードして public/wasm/ に同梱している。
- * URL が http で始まらないと WebLLM はキャッシュを使わず直接 fetch する
+ * WebLLM に渡すモデルの設定。モデル実行用の wasm は拡張機能内のファイルを指す。
+ * addons.mozilla.org のポリシーでも外部から実行コードを取得できないため、wasm は public/wasm/ に同梱している
+ * (nyantopia-model の scripts/compile_webgpu.sh で作り、scripts/fetch-wasm.mjs が用意する)。
+ * URL が http で始まらないと WebLLM はキャッシュを使わず直接 fetch する。設定の値は WebLLM 組み込みの Qwen3-0.6B にならう
  */
 async function buildAppConfig(modelId: string): Promise<webllm.AppConfig> {
-  // 独自モデルは、同じアーキテクチャの組み込みモデルの設定(wasm など)を流用し、重みの URL だけ差し替える
-  const custom = CUSTOM_MODELS[modelId];
-  const baseId = custom?.base ?? modelId;
-  const record = webllm.prebuiltAppConfig.model_list.find((m) => m.model_id === baseId);
-  if (!record) throw new Error(`WebLLM の設定に ${baseId} がありません`);
-  const file = record.model_lib.split("/").pop() ?? "";
-  const modelUrl = custom ? ((await loadDevModelUrl()) ?? custom.model) : record.model;
-  return {
-    ...webllm.prebuiltAppConfig,
-    model_list: [{ ...record, model_id: modelId, model: modelUrl, model_lib: browser.runtime.getURL(`wasm/${file}`) }],
+  const def = MODELS[modelId];
+  if (!def) throw new Error(`モデルの設定に ${modelId} がありません`);
+  const record: webllm.ModelRecord = {
+    model: (await loadDevModelUrl()) ?? def.model,
+    model_id: modelId,
+    model_lib: browser.runtime.getURL(`wasm/${def.lib.file}`),
+    vram_required_MB: def.lib.vramMB,
+    low_resource_required: true,
+    overrides: { context_window_size: 4096 },
   };
+  return { ...webllm.prebuiltAppConfig, model_list: [record] };
+}
+
+/** 以前のバージョンが Hugging Face から取ってキャッシュした Qwen3 の重み(約 340MB)を消す。一度だけ行う */
+async function removeLegacyModelCaches(): Promise<void> {
+  const FLAG = "legacyModelCacheRemoved";
+  const got = await browser.storage.local.get(FLAG);
+  if (got[FLAG]) return;
+  for (const m of LEGACY_MODELS) {
+    try {
+      const config = { ...webllm.prebuiltAppConfig, model_list: [{ model_id: m.model_id, model: m.model, model_lib: "" }] };
+      await webllm.deleteModelAllInfoInCache(m.model_id, config);
+    } catch (err) {
+      // キャッシュがなければ失敗するが、消す必要もないので無視する
+      console.debug("[nyantopia] 以前のモデルのキャッシュ削除:", m.model_id, err);
+    }
+  }
+  await browser.storage.local.set({ [FLAG]: true });
 }
 
 let appConfig: webllm.AppConfig | null = null;
@@ -104,7 +120,6 @@ async function ensureModel(modelId: string): Promise<webllm.MLCEngine> {
       const initProgressCallback = (p: webllm.InitProgressReport) => {
         void setStatus({ state: "loading", modelId, progress: p.progress ?? 0, text: p.text ?? "読み込み中…" });
       };
-      resetHistory();
       await ensureRuntimeWasm();
       appConfig = await buildAppConfig(modelId);
       if (!engine) {
@@ -132,40 +147,20 @@ async function ensureModel(modelId: string): Promise<webllm.MLCEngine> {
 // ---------- LLM による変換 ----------
 
 /**
- * KV キャッシュを再利用するための会話履歴。
- * WebLLM は「前回の会話の続き」の形(前回のメッセージ列 + 前回の答え + 新しい文)で送られたときだけ、
- * 前回分の KV キャッシュを使い回して新しい部分だけを prefill する。
- * そこで「文 → 答え → 次の文 → 答え…」と 1 つの会話として積み重ねて送る。
- * 履歴の答えは、モデルが生成したものを一字も変えずに入れる(変えると「続き」と判定されない)
+ * 1 文をモデルに渡して、ねこ語の文を生成する。
+ * 学習時と同じ 1 つの文字列を completions API に渡す(毎回 KV キャッシュを作り直すが、プロンプトが短いので prefill は軽い)
  */
-let history: webllm.ChatCompletionMessageParam[] = [];
-/** 会話が長くなりすぎないよう、このターン数でリセットする */
-const MAX_HISTORY_TURNS = 12;
-
-function resetHistory(): void {
-  history = [];
-}
-
 async function generate(eng: webllm.MLCEngine, text: string, temperature: number, seed?: number): Promise<string> {
-  if (history.length >= MAX_HISTORY_TURNS * 2) resetHistory();
-  const base = buildMessages(text, isTunedModel(loadedModelId));
-  const messages: webllm.ChatCompletionMessageParam[] = [
-    ...(base.slice(0, -1) as webllm.ChatCompletionMessageParam[]),
-    ...history,
-    base[base.length - 1] as webllm.ChatCompletionMessageParam,
-  ];
   const t0 = performance.now();
-  const res = await eng.chat.completions.create({
-    messages,
+  const res = await eng.completions.create({
+    prompt: buildLlmjpPrompt(text),
     temperature,
     top_p: 0.9,
     max_tokens: MAX_TOKENS,
-    // 「にゃ」の繰り返しを罰しないよう frequency_penalty は使わず、同じ文のループだけ軽く抑える
     repetition_penalty: 1.1,
     seed,
-    stop: ["入力:", "\n\n\n"],
-    // Qwen3 の thinking モードを無効化する
-    extra_body: { enable_thinking: false },
+    // 答えの後は </s> で止まる。止まらずに次の「### 指示:」を書き始めたときの保険
+    stop: ["\n\n", "### 指示"],
   });
   lastStats = {
     prompt_tokens: res.usage?.prompt_tokens ?? -1,
@@ -173,10 +168,8 @@ async function generate(eng: webllm.MLCEngine, text: string, temperature: number
     prefill_tokens_per_s: res.usage?.extra?.prefill_tokens_per_s ?? -1,
     decode_tokens_per_s: res.usage?.extra?.decode_tokens_per_s ?? -1,
     ms: Math.round(performance.now() - t0),
-    history_len: history.length,
-    messages_len: messages.length,
   };
-  const content = res.choices[0]?.message?.content ?? "";
+  const content = res.choices[0]?.text ?? "";
   lastRaw = { raw: content, finish: res.choices[0]?.finish_reason ?? "" };
   return content;
 }
@@ -185,47 +178,28 @@ async function generate(eng: webllm.MLCEngine, text: string, temperature: number
 let lastStats: Record<string, number> = {};
 let lastRaw: Record<string, string> = {};
 
-/** この値未満しか元の文が残っていなければ、モデルの出力を捨ててルール変換にする */
-const MIN_RETENTION = 0.85;
 /** 直近の文がルール変換に切り替わったか(評価スクリプト用) */
 let lastFallback = false;
 
-function stripThink(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/gu, "").trim();
-}
-
-/** 1 文を LLM で変換する。元の文が崩れていたらルール変換に切り替える */
+/** 1 文をモデルで変換する。意味が変わる出力や文の途中を変えた出力はルール変換に切り替える */
 async function convertSentence(eng: webllm.MLCEngine, sentence: string): Promise<{ text: string; byRule: boolean }> {
   const fallback = () => ({ text: convertByRule(sentence, false), byRule: true });
   const trimmed = sentence.trim();
   if (!isConvertible(trimmed)) return { text: sentence, byRule: false };
 
-  // チューニング済みモデルは語尾の言い換えをするので、対応表の範囲に収まっているかで判定する。
-  // 素のモデルは「写して にゃ を付けるだけ」なので、文字が変わっていないかで判定する
-  const tuned = isTunedModel(loadedModelId);
-  const bad = (t: string) =>
-    !postProcess(t, false, trimmed) ||
-    (tuned
-      ? !isAllowedRewrite(trimmed, t)
-      : copiedExample(t, trimmed) || hasForeignChars(trimmed, t) || retention(trimmed, t) < MIN_RETENTION);
-  // Qwen3 は thinking を無効にしても出力の先頭に空の <think></think> を付けるので、判定の前に外す
-  let raw = await generate(eng, trimmed, 0);
-  let out = stripThink(raw);
+  // 語尾の言い換えを学習させたモデルなので、元の文との違いが対応表の範囲に収まっているかで判定する
+  const bad = (t: string) => !postProcess(t, false, trimmed) || !isAllowedRewrite(trimmed, t);
+  let out = (await generate(eng, trimmed, 0)).trim();
   if (bad(out)) {
     // 貪欲法で崩れたときは、少しだけ揺らして一度だけやり直す
-    raw = await generate(eng, trimmed, 0.3, Date.now() % 100000);
-    out = stripThink(raw);
+    out = (await generate(eng, trimmed, 0.3, Date.now() % 100000)).trim();
   }
   if (bad(out)) {
-    // 崩れた答えを履歴に残すと後の文に悪影響なので、会話をやり直す
-    console.debug("[nyantopia] 保持率が低いのでルール変換にします:", trimmed, "→", out);
-    resetHistory();
+    console.debug("[nyantopia] 対応表の範囲を超えているのでルール変換にします:", trimmed, "→", out);
     lastFallback = true;
     return fallback();
   }
   lastFallback = false;
-  // 直近に生成した答えを「生のまま」履歴に入れる(一字でも変えると WebLLM が会話の続きと判定しない)
-  history.push({ role: "user", content: trimmed }, { role: "assistant", content: raw });
   let result = postProcess(out, false, trimmed);
   // モデルが句点の代わりに改行や連続スペースを出すことがあるので、元の文になければ取り除く
   if (!/\n/.test(trimmed)) result = result.replace(/\s*\n\s*/g, "");
@@ -352,4 +326,5 @@ void (async () => {
   await setStatus({ state: "idle", modelId: "", text: "未読み込み" });
   await updateBadge((await loadSettings()).enabled);
   await removeLegacyCounts();
+  await removeLegacyModelCaches();
 })();

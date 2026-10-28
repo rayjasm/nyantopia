@@ -25,7 +25,7 @@
 
 | モデル | ライセンス | 提供元 |
 | --- | --- | --- |
-| [nyantopia-Qwen3-0.6B-q4f16_1-MLC](https://huggingface.co/jasmray/nyantopia-Qwen3-0.6B-q4f16_1-MLC)([Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) をねこ語向けに LoRA で学習させ、q4f16_1 に量子化したもの) | Apache License 2.0(ベースモデルと同じ) | ベースモデル: Alibaba Cloud / Qwen Team。学習: にゃんとぴあ |
+| [nyantopia-llm-jp-3-150m-q4f16_1-MLC](https://huggingface.co/jasmray/nyantopia-llm-jp-3-150m-q4f16_1-MLC)([llm-jp-3-150m-instruct3](https://huggingface.co/llm-jp/llm-jp-3-150m-instruct3) をねこ語向けに LoRA で学習させ、q4f16_1 に量子化したもの) | Apache License 2.0(ベースモデルと同じ) | ベースモデル: LLM-jp(国立情報学研究所 大規模言語モデル研究開発センター)。学習: にゃんとぴあ |
 
 ## 画像素材
 
