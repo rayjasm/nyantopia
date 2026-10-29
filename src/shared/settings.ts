@@ -109,6 +109,27 @@ export function onModelStatusChanged(cb: (s: ModelStatus) => void): void {
   });
 }
 
+/**
+ * モデルごとに、最後に読み込んだ重みのコミット ID(Hugging Face の X-Repo-Commit)。
+ * WebLLM は URL をキーに重みをキャッシュするので、同じファイル名で上げ直した重みはそのままでは届かない。
+ * background がモデルを読み込む前にこの値と比べ、変わっていれば古いキャッシュを捨てる
+ */
+const REVISION_KEY = "modelRevisions";
+
+export async function loadModelRevision(modelId: string): Promise<string | undefined> {
+  const got = await browser.storage.local.get(REVISION_KEY);
+  const revs = (got[REVISION_KEY] ?? {}) as Record<string, string>;
+  return revs[modelId];
+}
+
+export async function saveModelRevision(modelId: string, revision: string | undefined): Promise<void> {
+  const got = await browser.storage.local.get(REVISION_KEY);
+  const revs = { ...((got[REVISION_KEY] ?? {}) as Record<string, string>) };
+  if (revision) revs[modelId] = revision;
+  else delete revs[modelId];
+  await browser.storage.local.set({ [REVISION_KEY]: revs });
+}
+
 /** 以前のバージョンが保存していた「今日癒した言葉」の件数を消す(v0.3.2 で機能を削除) */
 export async function removeLegacyCounts(): Promise<void> {
   await browser.storage.local.remove("counts");

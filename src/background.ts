@@ -8,11 +8,12 @@ import {
   isTargeted, type BackgroundMessage, type ConvertResponse, type ErrorResponse, type ModelStatusResponse,
 } from "./shared/messages";
 import {
-  addTailEmojis, buildLlmjpPrompt, convertByRule, isAllowedRewrite, isConvertible, MAX_TOKENS, postProcess, splitSentences,
+  addTailEmojis, buildLlmjpPrompt, convertByRule, isAllowedRewrite, isConvertible, MAX_TOKENS, postProcess, splitHashtagTail,
+  splitSentences,
 } from "./shared/nyan";
 import {
-  LEGACY_MODELS, loadDevModelUrl, loadModelStatus, loadSettings, MODELS, onSettingsChanged, removeLegacyCounts, saveModelStatus,
-  type ModelStatus,
+  LEGACY_MODELS, loadDevModelUrl, loadModelRevision, loadModelStatus, loadSettings, MODELS, onSettingsChanged, removeLegacyCounts,
+  saveModelRevision, saveModelStatus, type ModelStatus,
 } from "./shared/settings";
 import runtimeWasm from "./runtime-wasm.json";
 
@@ -87,6 +88,38 @@ async function removeLegacyModelCaches(): Promise<void> {
 let appConfig: webllm.AppConfig | null = null;
 
 /**
+ * Hugging Face 上の重みが更新されていたら、キャッシュした古い重みを捨てる。
+ * 重みの索引ファイルを HEAD で取り、応答の X-Repo-Commit(リポジトリのコミット ID)を前回読み込んだときの値と比べる
+ * (リダイレクト後の応答にも付いていて、CORS で読める)。ネットワークに届かないときや、
+ * ヘッダーがないとき(開発用のローカル配信)は何もせず、キャッシュのまま読み込む
+ */
+async function dropCacheIfWeightsChanged(modelId: string, config: webllm.AppConfig): Promise<void> {
+  const record = config.model_list.find((m) => m.model_id === modelId);
+  if (!record) return;
+  let commit: string | null;
+  try {
+    const res = await fetch(`${record.model}/resolve/main/tensor-cache.json`, { method: "HEAD", cache: "no-store" });
+    commit = res.ok ? res.headers.get("x-repo-commit") : null;
+  } catch {
+    return;
+  }
+  if (!commit) return;
+  const prev = await loadModelRevision(modelId);
+  if (prev === commit) return;
+  if (prev) {
+    await setStatus({ state: "loading", modelId, text: "モデルが更新されているので、古いキャッシュを削除しています…" });
+    try {
+      await webllm.deleteModelAllInfoInCache(modelId, config);
+    } catch (err) {
+      // 消せなければ古いまま使い、次回また試す
+      console.warn("[nyantopia] 古いモデルのキャッシュ削除に失敗:", err);
+      return;
+    }
+  }
+  await saveModelRevision(modelId, commit);
+}
+
+/**
  * WebLLM が JavaScript に埋め込んでいた wasm(トークナイザと文法エンジン)を読み込む。
  * build.mjs がバンドル時に dist/wasm/ へ切り出し、WebLLM 側は globalThis 上のバイト列を参照するよう書き換えてある
  */
@@ -122,6 +155,7 @@ async function ensureModel(modelId: string): Promise<webllm.MLCEngine> {
       };
       await ensureRuntimeWasm();
       appConfig = await buildAppConfig(modelId);
+      await dropCacheIfWeightsChanged(modelId, appConfig);
       if (!engine) {
         engine = await webllm.CreateMLCEngine(modelId, { initProgressCallback, appConfig });
       } else {
@@ -184,8 +218,10 @@ let lastFallback = false;
 /** 1 文をモデルで変換する。意味が変わる出力や文の途中を変えた出力はルール変換に切り替える */
 async function convertSentence(eng: webllm.MLCEngine, sentence: string): Promise<{ text: string; byRule: boolean }> {
   const fallback = () => ({ text: convertByRule(sentence, false), byRule: true });
-  const trimmed = sentence.trim();
-  if (!isConvertible(trimmed)) return { text: sentence, byRule: false };
+  if (!isConvertible(sentence.trim())) return { text: sentence, byRule: false };
+  // 文末のハッシュタグ(「… #てんちむ #三崎優太」)はモデルに渡さず、変換した文の後ろに戻す(モデルが書き換えたり落としたりしないように)
+  const { body: core, tags } = splitHashtagTail(sentence.trim());
+  const trimmed = core.trim();
 
   // 語尾の言い換えを学習させたモデルなので、元の文との違いが対応表の範囲に収まっているかで判定する
   const bad = (t: string) => !postProcess(t, false, trimmed) || !isAllowedRewrite(trimmed, t);
@@ -207,7 +243,7 @@ async function convertSentence(eng: webllm.MLCEngine, sentence: string): Promise
   // 元の文末の句読点が落ちていたら戻す
   const punct = trimmed.match(/[。！？!?]+$/u)?.[0] ?? "";
   if (punct && !/[。！？!?]$/u.test(result)) result += punct;
-  return { text: result || fallback().text, byRule: false };
+  return { text: result ? result + tags : fallback().text, byRule: false };
 }
 
 /** テキストノード 1 つ分を変換する。文ごとに分けて LLM にかける(短いほど写し間違いが減る) */
@@ -279,6 +315,7 @@ async function handle(msg: BackgroundMessage): Promise<Response> {
         // 同梱 wasm は Cache API の対象外なので、その削除に失敗しても無視する
         console.warn("[nyantopia] キャッシュ削除で警告:", err);
       }
+      await saveModelRevision(msg.modelId, undefined);
       await setStatus({ state: "idle", modelId: "", text: "キャッシュを削除しました" });
       return { ok: true };
     case "stats":

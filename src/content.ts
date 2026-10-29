@@ -18,6 +18,12 @@ const MAX_UNITS_LLM = 300;
  * これを超えるまとまりは文の切れ目(<br> の前が句点など)で分割する。それでも超える単位はルール変換だけにして LLM には送らない
  */
 const MAX_TEXT_LENGTH = 300;
+/**
+ * この長さを超える単位はルール変換のままにする(LLM に渡さない)。
+ * background は単位を文ごとに分けてモデルにかけるので、長さは「結果が返るまでの待ち時間」にだけ効く。
+ * リンクをまたいで段落全体が 1 単位になることがあるため、MAX_TEXT_LENGTH より大きくしてある
+ */
+const MAX_TEXT_LENGTH_LLM = 1000;
 /** 画面の高さの何倍以内にあれば「画面に近い」として LLM にかけるか */
 const NEAR_VIEWPORT = 1.5;
 
@@ -26,7 +32,22 @@ const SKIP_TAGS = new Set([
   "CODE", "PRE", "KBD", "SAMP", "SVG", "MATH", "IFRAME", "CANVAS", "TEMPLATE",
   // 見出しは文ではないことが多く、小型モデルが崩しやすいので対象外にする
   "H1", "H2", "H3", "H4", "H5", "H6", "TITLE",
+  // 脚注番号(Wikipedia の [1])、添字、ルビの読み。文の一部ではないので変換しない(下の INLINE_TAGS でもあるので、文は切らない)
+  "SUP", "SUB", "RT", "RP",
 ]);
+
+/**
+ * 文の途中に現れても文を切らない行内要素。リンク、強調、脚注番号、絵文字の画像など。
+ * これ以外の要素(p、div、li、td、input など)が間にあれば別の単位にする。CSS の display は見ず、タグ名だけで判断する
+ */
+const INLINE_TAGS = new Set([
+  "A", "ABBR", "B", "BDI", "BDO", "BR", "CITE", "CODE", "DEL", "DFN", "EM", "FONT", "I", "IMG", "INS", "KBD", "MARK",
+  "Q", "RP", "RT", "RUBY", "S", "SAMP", "SMALL", "SPAN", "STRONG", "SUB", "SUP", "TIME", "U", "VAR", "WBR",
+]);
+/** 単位を切らないが、中のテキストは文に含めない要素(SKIP_TAGS にも入っている行内要素) */
+const TRANSPARENT_TAGS = new Set(["SUP", "SUB", "RT", "RP", "CODE", "KBD", "SAMP"]);
+/** continuesAfter が prev から next までたどるノード数の上限(異常に長い DOM での保険) */
+const MAX_SCAN_NODES = 300;
 
 /**
  * 変換しない UI 部品の WAI-ARIA ロール。
@@ -37,7 +58,7 @@ const SKIP_ROLES = new Set([
   "tree", "treeitem", "tablist", "tab", "tooltip", "searchbox", "textbox", "spinbutton", "slider", "progressbar",
 ]);
 
-/** <br> や空白でつながった連続するテキストノードを 1 つの単位として扱う */
+/** 行内要素・<br>・空白でつながった連続するテキストノードを 1 つの単位として扱う(ノードの親は違ってよい) */
 interface Unit {
   nodes: Text[];
   /** 各ノードのテキストをつなげたもの(改行は入れない) */
@@ -76,21 +97,43 @@ function isSkippable(node: Node): boolean {
   return false;
 }
 
-/** prev と next が同じ親を持ち、間に <br> か空白テキストしかなければ同じ単位とみなす */
+/**
+ * prev と next が同じ文の続きかどうか。prev から next まで文書順にたどり、途中が行内要素(INLINE_TAGS)と
+ * 空白テキストだけなら同じ単位とみなす。ブロック要素に出会うか、ブロック要素の外に出たら別の単位。
+ * 「ヨーロッパ各地で展開した<a>建築様式</a>である。」のように、リンクや強調で分かれたテキストノードを 1 つの文として扱うため
+ */
 function continuesAfter(prev: Text, next: Text): boolean {
-  if (prev.parentNode !== next.parentNode) return false;
-  let sib: Node | null = prev.nextSibling;
-  while (sib && sib !== next) {
-    if (sib.nodeType === Node.ELEMENT_NODE) {
-      if ((sib as Element).tagName !== "BR") return false;
-    } else if (sib.nodeType === Node.TEXT_NODE) {
-      if ((sib.nodeValue ?? "").trim()) return false;
+  let node: Node = prev;
+  for (let steps = 0; steps < MAX_SCAN_NODES; steps++) {
+    // 次のノードへ(子 → 兄弟 → 親の兄弟)。TRANSPARENT_TAGS の中には入らない
+    let cur: Node | null = null;
+    const el = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : null;
+    if (node.firstChild && !(el && TRANSPARENT_TAGS.has(el.tagName))) {
+      cur = node.firstChild;
     } else {
+      let up: Node | null = node;
+      while (up && !up.nextSibling) {
+        up = up.parentNode;
+        // 要素の外に出るとき、その要素がブロック要素なら文はそこで終わり
+        if (!up || up.nodeType !== Node.ELEMENT_NODE || !INLINE_TAGS.has((up as Element).tagName)) return false;
+      }
+      cur = up?.nextSibling ?? null;
+    }
+    if (!cur) return false;
+    if (cur === next) return true;
+    if (cur.nodeType === Node.ELEMENT_NODE) {
+      const tag = (cur as Element).tagName;
+      if (!INLINE_TAGS.has(tag)) return false;
+      if (!TRANSPARENT_TAGS.has(tag) && shouldSkipElement(cur as Element)) return false;
+    } else if (cur.nodeType === Node.TEXT_NODE) {
+      // 変換済みなどで walker が飛ばしたテキストがあれば、そこで切る
+      if ((cur.nodeValue ?? "").trim()) return false;
+    } else if (cur.nodeType !== Node.COMMENT_NODE) {
       return false;
     }
-    sib = sib.nextSibling;
+    node = cur;
   }
-  return sib === next;
+  return false;
 }
 
 /**
@@ -213,7 +256,8 @@ function writeUnit(unit: Unit, converted: string): boolean {
     const original = originals.get(node) ?? "";
     const lead = original.match(/^\s*/)?.[0] ?? "";
     const trail = original.match(/\s*$/)?.[0] ?? "";
-    const value = lead + pieces[i].trim() + trail;
+    // 空白だけのノード(行内要素の間の空白)はそのまま。lead と trail が同じ空白を指すので二重にしない
+    const value = original.trim() ? lead + pieces[i].trim() + trail : original;
     node.nodeValue = value;
     applied.set(node, value);
   });
@@ -229,8 +273,8 @@ function handleUnits(units: Unit[]): void {
     const cached = settings.engine === "llm" ? llmCache.get(text) : undefined;
     const ruleText = cached ?? convertByRule(text, settings.emoji);
     if (!writeUnit(unit, ruleText)) continue;
-    // 文の切れ目で分けても長すぎる単位はルール変換のままにする(小型モデルは長文を崩しやすい)
-    if (settings.engine === "llm" && cached === undefined && text.length <= MAX_TEXT_LENGTH) pending.push(unit);
+    // 長すぎる単位はルール変換のままにする
+    if (settings.engine === "llm" && cached === undefined && text.length <= MAX_TEXT_LENGTH_LLM) pending.push(unit);
   }
   kick();
 }

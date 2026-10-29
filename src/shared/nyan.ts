@@ -16,6 +16,22 @@ export function buildLlmjpPrompt(text: string): string {
 const OPEN_BRACKETS = "「『（(［[【〈《“\"";
 const CLOSE_BRACKETS = "」』）)］]】〉》”\"";
 
+/**
+ * ハッシュタグ 1 つ(「#てんちむ」「＃ゲーム実況」)。英数字の直後の #(「C#」)は除く。
+ * YouTube の概要欄や X の投稿では文末に並ぶので、「にゃ」と絵文字はその前に置き、タグだけの文字列は文とみなさない
+ */
+const HASHTAG = "(?<![A-Za-z0-9])[#＃][^\\s#＃。、！？!?「」『』（）()]+";
+const HASHTAG_TAIL = new RegExp(`(?:\\s*${HASHTAG})+\\s*$`, "u");
+const HASHTAGS_ONLY = new RegExp(`^(?:\\s*${HASHTAG})+\\s*$`, "u");
+
+/** 文末に並ぶハッシュタグを切り離す。tags は前の空白を含む(戻すときはそのまま連結する) */
+export function splitHashtagTail(text: string): { body: string; tags: string } {
+  if (HASHTAGS_ONLY.test(text)) return { body: "", tags: text };
+  const m = text.match(HASHTAG_TAIL);
+  if (!m || m.index === undefined) return { body: text, tags: "" };
+  return { body: text.slice(0, m.index), tags: text.slice(m.index) };
+}
+
 /** 文の区切りで分割する。区切り文字は前の文に含める。かっこの中の「。？！」では区切らない */
 export function splitSentences(text: string): string[] {
   const out: string[] = [];
@@ -92,18 +108,20 @@ export function unchanged(outText: string, inText: string): boolean {
 export function ensureNyan(text: string): string {
   const parts = splitSentences(text);
   const fixed = parts.map((seg) => {
-    const m = seg.match(/^(.*?)([\s。！？!?\n…〜～ー♪♡\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]*)$/su);
+    // 文末のハッシュタグは外しておき、「にゃ」を付けた後ろに戻す
+    const { body: core, tags } = splitHashtagTail(seg);
+    const m = core.match(/^(.*?)([\s。！？!?\n…〜～ー♪♡\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]*)$/su);
     if (!m) return seg;
     const body = m[1];
     const tail = m[2] || "";
     // 空、または「は？」のような 1 文字の相づちは触らない
     if (body.trim().length <= 1) return seg;
     // 日本語を含まない文(「Yahoo!ニュース」の「Yahoo!」、英語の感嘆文)には付けない。LLM の経路と同じ判定
-    if (!hasJapanese(seg)) return seg;
+    if (!hasJapanese(core)) return seg;
     // 日付やラベルのような文でないものには付けない
-    if (!looksLikeSentence(seg)) return seg;
+    if (!looksLikeSentence(core)) return seg;
     if (/(にゃ|にゃん|にゃあ|にゃー|にゃ〜|にゃ～)$/u.test(body)) return seg;
-    return normalizeParticles(body + "にゃ") + tail;
+    return normalizeParticles(body + "にゃ") + tail + tags;
   });
   return moveNyanIntoQuotes(fixed.join(""));
 }
@@ -156,7 +174,9 @@ export function addTailEmojis(text: string): string {
   const re = new RegExp(`^(.*?)([。！？!?…‥]*)(${SLANG_TAIL}?)([。！？!?…‥]*)([」』]*)(\\s*)$`, "su");
   return splitSentences(text)
     .map((seg) => {
-      const m = seg.match(re);
+      // 文末のハッシュタグは外しておき、絵文字の後ろに戻す
+      const { body: core, tags } = splitHashtagTail(seg);
+      const m = core.match(re);
       if (!m) return seg;
       const [, body, punct1, slang, punct2, closeQuotes, trail] = m;
       // 空、または「は？」のような 1 文字の相づちには付けない
@@ -164,7 +184,7 @@ export function addTailEmojis(text: string): string {
       // 変換されていない(にゃ で終わっていない)文には付けない
       if (!/(にゃ|にゃん|にゃあ|にゃー|にゃ〜|にゃ～)$/u.test(body)) return seg;
       if (/\p{Extended_Pictographic}️?\s*$/u.test(body)) return seg;
-      return body + punct1.replace(/。/g, "") + slang + punct2.replace(/。/g, "") + pickEmoji(body) + closeQuotes + trail;
+      return body + punct1.replace(/。/g, "") + slang + punct2.replace(/。/g, "") + pickEmoji(body) + closeQuotes + trail + tags;
     })
     .join("");
 }
@@ -194,7 +214,8 @@ const UI_LABELS = new Set([
  * 形態素解析は使わず、末尾の形で判断する
  */
 export function looksLikeSentence(text: string): boolean {
-  let t = text.trim();
+  // ハッシュタグだけなら文ではない。文末に並ぶハッシュタグは外して判定する
+  let t = splitHashtagTail(text.trim()).body.trim();
   // 末尾の「（編集済み）」「(edited)」のようなかっこ書きを外す
   t = t.replace(/[（(][^（）()]*[）)]\s*$/u, "").trim();
   // 末尾の絵文字・記号・空白を外す
